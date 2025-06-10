@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from backend.database import SessionLocal
+from backend.db.database import SessionLocal
 from backend.models.user import User
 from backend.auth.utils import hash_password, verify_password
 from pydantic import BaseModel
@@ -30,7 +30,7 @@ def register(credentials: UserCredentials, db: Session = Depends(get_db)):
     if db.query(User).filter_by(username=credentials.username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
 
-    user = User(name=credentials.name,username=credentials.username, hashed_password=hash_password(credentials.password))
+    user = User(name=credentials.name,username=credentials.username, hashed_password=hash_password(credentials.password), email=credentials.email)
     db.add(user)
     db.commit()
     db.refresh(user)

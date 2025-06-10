@@ -5,7 +5,12 @@ import Register from './components/Register';
 
 function App() {
   const [userId, setUserId] = useState(null);
-  const [view, setView] = useState("login"); // or "register" or "upload"
+  const [view, setView] = useState("login");
+
+  const handleLogout = () => {
+    setUserId(null);
+    setView("login");
+  };
 
   const renderView = () => {
     if (!userId) {
@@ -16,17 +21,38 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="mb-4 space-x-4">
-        {!userId && (
-          <>
-            <button onClick={() => setView("login")} className="underline text-blue-600">Login</button>
-            <button onClick={() => setView("register")} className="underline text-green-600">Register</button>
-          </>
+    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-start px-4 py-10">
+      {/* Top bar */}
+      <div className="w-full max-w-4xl flex justify-between items-center mb-8">
+        <h1 className="text-2xl font-bold text-gray-800">CareerMapAI</h1>
+        {userId ? (
+          <button
+            onClick={handleLogout}
+            className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded shadow"
+          >
+            Logout
+          </button>
+        ) : (
+          <div className="space-x-4">
+            <button onClick={() => setView("login")} className="text-blue-600 underline">
+              Login
+            </button>
+            <button onClick={() => setView("register")} className="text-green-600 underline">
+              Register
+            </button>
+          </div>
         )}
       </div>
-      {renderView()}
+
+      {/* Main content */}
+      <div className="w-full max-w-4xl">
+        {renderView()}
+      </div>
+      <div className="bg-red-500 text-white p-4 rounded">
+  If this box is red, Tailwind is working!
+</div>
     </div>
+
   );
 }
 
