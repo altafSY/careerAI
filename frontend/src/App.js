@@ -48,9 +48,6 @@ function App() {
       <div className="w-full max-w-4xl">
         {renderView()}
       </div>
-      <div className="bg-red-500 text-white p-4 rounded">
-  If this box is red, Tailwind is working!
-</div>
     </div>
 
   );

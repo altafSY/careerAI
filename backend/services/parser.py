@@ -8,6 +8,8 @@ from backend.db.database import SessionLocal
 from sqlalchemy.orm import Session
 import json
 from io import BytesIO, StringIO
+from collections import defaultdict
+from typing import List, Dict, Any
 
 def get_text(file_content: bytes) -> str:
     output_string = StringIO()
@@ -21,69 +23,154 @@ def get_text(file_content: bytes) -> str:
     extract_text_to_fp(BytesIO(file_content), output_string, laparams=laparams, output_type='text', codec=None)
     return output_string.getvalue().replace('\t', ' ')  # extra safety: convert tabs to spaces
 
-def extract_degree(education_text: str):
-    degree_patterns = [
-        r"(Bachelor(?:'s)? of [A-Za-z ]+)",
-        r"(Master(?:'s)? of [A-Za-z ]+)",
-        r"(B\.?S\.?|B\.?A\.?|M\.?S\.?|M\.?A\.?|Ph\.?D\.?)",
-        r"(Associate(?:'s)? of [A-Za-z ]+)"
-    ]
-    for pattern in degree_patterns:
-        match = re.search(pattern, education_text, re.IGNORECASE)
-        if match:
-            return match.group(0).strip()
+# ── 1) trivial field regexes ───────────────────────────────────
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+PHONE_RE = re.compile(r"(?:\+?\d{1,3}[\s.\-]*)?(?:\(\d{3}\)|\d{3})[\s.\-]*\d{3}[\s.\-]*\d{4}")
+NAME_RE  = re.compile(r"^[A-Z][A-Za-z'’\-\.]+(?:\s+[A-Z][A-Za-z'’\-\.]+){1,3}$")
+
+# ── 2) section splitter ────────────────────────────────────────
+SECTION_RE = re.compile(
+    r""" ^\s*(?:[-–—•●▪‣◦∙]\s*)?
+          (?P<hdr> (?:                                   # A) canonical keywords
+              (?P<kw>
+                  (?:technical\s+)?skills? |
+                  (?:professional\s+)?experience |
+                  work\s+history |
+                  research\s+experience |
+                  internships? |
+                  projects? |
+                  certifications? |
+                  activities |
+                  extracurriculars? |
+                  leadership |
+                  interests? |
+                  education |
+                  summary | objective | profile |
+                  additional\s+information |
+                  technologies | languages
+              )\b.* )
+            | [A-Z][A-Z0-9\s&/]{2,}                     # B) ALL-CAPS fallback
+          )
+          \s*:?\s*$ """,
+    re.I | re.VERBOSE,
+)
+
+_NORMALISE = {
+    **{k: "skills" for k in (
+        "technical skills", "skills", "skill", "core competencies",
+        "technologies", "languages",
+        "skills & abilities", "skills & assets", "skills & interests", "skills & expertise")},
+    **{k: "experience" for k in (
+        "professional experience", "work history",
+        "research experience", "internships", "internship")},
+    "projects":       "projects",
+    "certifications": "certifications",
+    "activities":     "activities",
+    "summary":        "summary", "objective": "summary", "profile": "summary",
+    "interests":      "interests",
+}
+
+def _split_sections(lines: List[str]) -> Dict[str, List[str]]:
+    secs, current = defaultdict(list), "preamble"
+    for ln in lines:
+        if (m := SECTION_RE.match(ln)):
+            kw = m.group("kw") or m.group("hdr")
+            current = _NORMALISE.get(kw.lower(), kw.lower())
+            continue
+        secs[current].append(ln)
+    return secs
+
+
+# ── 3) degree / college helpers ────────────────────────────────
+_BS_RE = re.compile(r"(?:B\.?S\.?|Bachelor(?:'s)?\s+of\s+Science)\s*(?:in)?\s*"
+                    r"(?P<maj>[A-Za-z&\s/+-]{3,}?)(?=[,/|-]|$)", re.I)
+def extract_degree(edu: str) -> str|None:
+    for ln in edu.splitlines():
+        if (m := _BS_RE.search(ln)):
+            maj = " ".join(w.capitalize() for w in m["maj"].split())
+            return f"BS in {maj}"
     return None
 
-def extract_college(education_text: str):
-    college_pattern = r"(?:University|College|Institute|School of [A-Za-z]+|Polytechnic|Academy)[^\n,]*"
-    match = re.search(college_pattern, education_text, re.IGNORECASE)
-    return match.group(0).strip() if match else None
+def extract_college(edu: str) -> str|None:
+    if (m := re.search(r"(University|College|Institute|Polytechnic|Academy)[^\n,]*", edu, re.I)):
+        return m[0].strip()
+    return None
 
-def parse_resume(file_content: bytes) -> dict:
-    text = get_text(file_content)
-    lines = [line.strip() for line in text.split("\n") if line.strip()]
-    full_text = "\n".join(lines)
 
-    name = lines[0] if lines else "Unknown"
+# ── 4) skills cleaner ──────────────────────────────────────────
+def _clean_bullets(txt: str) -> List[str]:
+    return [p.strip() for p in re.split(r"[\n,;•·●\u2022]", txt) if len(p.strip()) > 1]
 
-    email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", full_text)
-    email = email_match.group(0) if email_match else None
 
-    phone_match = re.search(r"(\+?\d{1,2}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", full_text)
-    phone = phone_match.group(0) if phone_match else None
+# ── 5) experience extractor  – smarter bullet/header detection ─
+DATE_RE   = re.compile(r"\b(?:19|20)\d{2}\b|\bPresent\b")
+BULLETS   = "•-–—▪‣◦∙·"
 
-    skills_match = re.search(r"(Skills|Technical Skills)\s*[:\-]?\s*\n(.*?)(\n[A-Z][a-z]+|\Z)", full_text,
-                             re.DOTALL | re.IGNORECASE)
-    skills_block = skills_match.group(2).strip() if skills_match else ""
-    skills = [s.strip() for s in re.split(r"[\n,•·]", skills_block) if len(s.strip()) > 1]
+def _looks_like_header(line: str) -> bool:
+    """Heuristic: header usually has a comma/location & at least one year/dash."""
+    if DATE_RE.search(line):
+        return True
+    return bool(re.search(r"\bIntern|Assistant|Engineer|Research|Developer|Analyst\b", line))
 
-    edu_match = re.search(r"Education\s*[:\-]?\s*(.*?)\n(?:[A-Z][a-z]+|\Z)", full_text, re.IGNORECASE | re.DOTALL)
-    education = edu_match.group(1).strip() if edu_match else None
+def extract_experiences(block: str) -> List[Dict[str, Any]]:
+    jobs, header, bullets = [], None, []
+    for raw in block.splitlines():
+        ln = raw.rstrip()
+        if not ln.strip():
+            continue
 
-    degree = extract_degree(education)
-    college = extract_college(education)
+        stripped = ln.lstrip(BULLETS + " ").rstrip()
 
-    exp_match = re.search(r"(Experience|Professional Experience|Work History)\s*[:\-]?\s*(.*)", full_text,
-                          re.IGNORECASE | re.DOTALL)
-    experience = exp_match.group(2).strip() if exp_match else ""
+        # 1) Header line (even if it starts with a bullet)
+        if _looks_like_header(stripped):
+            if header:
+                jobs.append({"header": header, "bullets": bullets})
+            header, bullets = stripped, []
+            continue
 
-    designation = None
-    company_names = None
-    total_experience = None
-    no_of_pages = None
+        # 2) Bullet continuation
+        if header:
+            if ln.lstrip().startswith(tuple(BULLETS)):
+                bullets.append(stripped)
+            elif bullets and ln.strip()[0].islower():        # wrapped line
+                bullets[-1] += " " + ln.strip()
+            else:                                            # accidental stray line → append
+                bullets.append(stripped)
+    if header:
+        jobs.append({"header": header, "bullets": bullets})
+    return jobs
+
+
+# ── 6) main entry point ───────────────────────────────────────
+def parse_resume(file_content: bytes) -> Dict[str, Any]:
+    text  = get_text(file_content)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # simple one-liners
+    name  = next((ln for ln in lines if NAME_RE.match(ln)), "Unknown")
+    email = (EMAIL_RE.search(text) or [None])[0]
+    phone = (PHONE_RE.search(text) or [None])[0]
+
+    # sections
+    secs       = _split_sections(lines)
+    skills_blk = "\n".join(secs.get("skills", []))
+    edu_blk    = "\n".join(secs.get("education", []))
+    exp_blk    = "\n".join(secs.get("experience", []))
 
     return {
-        "name": name,
-        "email": email,
-        "mobile_number": phone,
-        "skills": skills,
-        "college_name": college,
-        "degree": degree,
-        "designation": designation,
-        "experience": experience[:1500],  # Truncate long blobs
-        "company_names": company_names,
-        "no_of_pages": no_of_pages,
-        "total_experience": total_experience
+        "name":            name,
+        "email":           email,
+        "mobile_number":   phone,
+        "skills":          _clean_bullets(skills_blk),
+        "college_name":    extract_college(edu_blk),
+        "degree":          extract_degree(edu_blk),
+        "experiences":     extract_experiences(exp_blk),
+        "experience_raw":  exp_blk[:2000],     # keep a preview
+        # placeholders
+        "designation":      None,
+        "company_names":    None,
+        "no_of_pages":      None,
+        "total_experience": None,
     }
 
 
@@ -102,41 +189,33 @@ def get_db():
     finally:
         db.close()
 
-def save_resume(parsed_skills: dict, user_id: int, db: Session = get_db):
-    # Convert experience to string blob
-    experience_blob = parsed_skills.get("experience")
-    if isinstance(experience_blob, list):
-        experience_blob = "\n".join(experience_blob)
+def save_profile(session: Session, user_id: int, file_bytes: bytes) -> ProfileData:
+    """
+    Parse the résumé and upsert it into profile_data; returns the DB row.
+    Assumes ProfileData.skills / experiences are JSONB (Postgres) or TEXT (SQLite).
+    """
+    parsed = parse_resume(file_bytes)
 
-    # Check if profile already exists
-    profile = db.query(ProfileData).filter(ProfileData.user_id == user_id).first()
+    record = session.query(ProfileData).filter_by(user_id=user_id).first()
+    if not record:
+        record = ProfileData(user_id=user_id)
+        session.add(record)
 
-    if profile:
-        # Update existing
-        profile.name = parsed_skills.get("name", profile.name)
-        profile.email = parsed_skills.get("email", profile.email)
-        profile.mobile_number = parsed_skills.get("mobile_number", profile.mobile_number)
-        profile.college = parsed_skills.get("college_name", profile.college)
-        profile.degree = parsed_skills.get("degree", profile.degree)
-        profile.designation = parsed_skills.get("designation", profile.designation)
-        profile.company_names = parsed_skills.get("company_names", profile.company_names)
-        profile.skills = json.dumps(parsed_skills.get("skills", []))
-        profile.experience = experience_blob
-    else:
-        # Insert new
-        profile = ProfileData(
-            user_id=user_id,
-            name=parsed_skills.get("name", "Unknown"),
-            email=parsed_skills.get("email"),
-            mobile_number=parsed_skills.get("mobile_number"),
-            college=parsed_skills.get("college_name"),
-            degree=parsed_skills.get("degree"),
-            designation=parsed_skills.get("designation"),
-            company_names=parsed_skills.get("company_names"),
-            skills=json.dumps(parsed_skills.get("skills", [])),
-            experience=experience_blob
-        )
-        db.add(profile)
+    # flat columns
+    record.name          = parsed["name"]
+    record.email         = parsed["email"]
+    record.mobile_number = parsed["mobile_number"]
+    record.college       = parsed["college_name"]
+    record.degree        = parsed["degree"]
+    record.designation   = parsed["designation"]
+    record.company_names = parsed["company_names"]
 
-    db.commit()
+    # JSON columns  (if TEXT, SQLAlchemy will auto-cast str/list on Postgres ≥14)
+    record.skills        = parsed["skills"]
+    record.experiences   = parsed["experiences"]
+    record.experience_raw = parsed["experience_raw"]
+
+    session.commit()
+    session.refresh(record)
+    return record
 
